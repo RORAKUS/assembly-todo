@@ -1,5 +1,5 @@
 BUILD_DIR="build"
-SOURCE_DIR="src"
+SOURCE_DIR="asm"
 PROGRAM_NAME="program"
 
 if ! [[ -d $SOURCE_DIR ]]; then

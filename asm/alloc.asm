@@ -49,13 +49,105 @@ global set_alloc_memory_appendix
 
 ; Free:
 ;   - just set the cluster as empty
+;   - clear too large clusters at the end
+
+realloc:
+    fun ; void* realloc(void* pointer, int size) - reallocates the pointer, returns 0 if success
+
+    ; 1. Find the cluster
+    ; 2. Find the next cluster
+    ;   - If the next cluster is empty and has the right size, reserve the remaining size and join them
+    ;   - If not, free the current cluster and allocate a new cluster, copy the memory
+
+    ; Reserve stack for two variables
+    ;   [esp] = cluster
+    ;   [esp + 4] = next cluster
+    sub esp, 8
+
+    ; Find the cluster with the correct pointer address
+    push [ebp + 8] ; push the pointer parameter as the startPtr argument
+    call _findCluster ; _findCluster(pointer) - returns eax = Cluster* cl
+    add esp, 4 ; clear the stack
+
+    ; Check for an error
+    cmp eax, NULL_PTR
+    je .reallocError ; if eax == NULL throw
+
+    mov [esp], eax ; save the cluster
+
+    ; Find the next cluster
+    mov ebx, [eax + CLUSTER_END_ADDR_INDEX] ; save the end address
+    add ebx, 4 ; the starting address of the next cluster
+    push ebx ; set the parameter startPtr
+    call _findCluster ; find the next cluster - returns in eax
+    add esp, 4 ; clear the stack
+
+    ; If the next cluster doesn't exist, create a new cluster
+    cmp eax, NULL_PTR
+    je .reallocNewCluster
+
+    mov [esp + 4], eax ; save the next cluster
+
+    ; If the next cluster is not free create a new cluster
+    cmp [eax + CLUSTER_IS_RESERVED_INDEX], byte TRUE
+    je .reallocNewCluster ; if eax.reserved allocate a new cluster
+
+    ; NEXT CLUSTER IS FREE
+    ;   1. set the current cluster as free
+    ;   2. join the two clusters
+    ;   3. reserve the newly created cluster using _reserveCluster
+    ;   4. return the start address
+
+    ; Set the current cluster as free
+    mov ebx, [esp] ; save the current cluster address into ebx
+    mov [ebx + CLUSTER_IS_RESERVED_INDEX], byte FALSE ; ebx.reserved = false
+
+    ; Join the two clusters todo
+
+    .reallocNewCluster:
+        ; NEXT CLUSTER ISN'T FREE
+
+    .reallocError:
+        mov eax, NULL
+
+    .reallocReturn:
+        return
 
 alloc:
     fun ; void* alloc(int size) - allocates memory in 'size' bytes and returns the pointer to its start
 
+    ; Get the empty cluster
+    ; If empty cluster NULL -> new memory, add cluster, reserve
 
+    ; Call _emptyClusterWithSize() to get the best cluster to use
+    push [ebp + 8] ; the size parameter -> size argument
+    call _emptyClusterWithSize ; returns eax = Cluster* or NULL
 
-    return
+    cmp eax, NULL_PTR ; if eax != NULL return eax.start
+    jne .allocClusterFound
+
+    ; Allocate new memory
+    push [allocMemoryAppendix] ; push the number of bytes as the size parameter
+    call _reserveBytes ; returns eax = the starting address
+
+    ; Add a new cluster with the new memory
+    sub esp, 8 ; reserve 8 bytes on the stack for the parameters
+    mov [esp], eax ; set the cluster start parameter to the start of the new memory
+    add eax, [ebp + 8] ; add the number of bytes reserved to get the end address
+    sub eax, 4 ; subtract 4 bytes to get the last dword address
+    mov [esp + 4], eax ; set the cluster end parameter
+    call _addNewCluster ; _addNewCluster(eax, eax + size - 4); eax = Cluster* cl
+    add esp, 8 ; clear the stack except the size parameter
+
+    .allocClusterFound:
+        ; Reserve the cluster
+        push eax ; the cluster parameter, size parameter already on the stack
+        call _reserveCluster ; _reserveCluster(eax, [ebp + 8])
+
+        ; Return the starting address of the found cluster
+        mov eax, [eax + CLUSTER_START_ADDR_INDEX]
+    .allocReturn:
+        return
 
 init_allocator:
     fun
@@ -99,6 +191,55 @@ set_alloc_memory_appendix:
     return
 
 ;; Cluster list manip
+_joinClusters:
+    fun ; Cluster* _joinClusters(Cluster* cl1, Cluster* cl2) - joins the two clusters, returns the final cluster
+
+    ; 0. cl2.start must equal to cl1.end + 4
+    ; 1. cl1.end = cl2.end
+    ; 2. delete cluster cl2
+
+    ; Check if the join operation is valid
+    mov eax, [ebp + 8] ; eax = cl1 param
+    mov ebx, [ebp + 12] ; ebx = cl2 param
+    mov edx, [eax + CLUSTER_END_ADDR_INDEX] ; edx = cl1.end
+    add edx, 4 ; edx = cl1.end + 4
+    cmp edx, [ebx + CLUSTER_START_ADDR_INDEX] ; if cl1.end + 4 != cl2.start return null
+    jne .jcError
+
+    ; todo
+
+    .jcError:
+        mov eax, NULL_PTR ; return NULL if error
+    .jcReturn:
+        return
+
+_findCluster:
+    fun ; Cluster* _findCluster(void* startPtr) - finds a cluster with a set start address
+
+    mov ecx, [clusterCount] ; the counter
+    .fcLoop1: ; for every cluster in the cluster list
+        dec ecx ; decrease the counter - index based
+
+        ; Get the cluster at index ecx (Cluster*) - [clusters] + ecx * CLUSTER_STRUCT_SIZE
+        mov eax, CLUSTER_STRUCT_SIZE
+        mul ecx ; eax = ecx * CLUSTER_STRUCT_SIZE
+        mov ebx, [clusters]
+        lea ebx, [ebx + eax] ; ebx = [clusters] + eax
+
+        ; Check if the cluster address equals the parameter
+        cmp [ebx + CLUSTER_START_ADDR_INDEX], [ebp + 8]
+        je .fcReturn ; if ebx.start == startPtr return ebx
+
+        cmp ecx, 0 ; if ecx != 0 continue
+        jne .fcLoop1
+
+    ; If no cluster found, set the current cluster to NULL
+    mov ebx, NULL_PTR
+
+    .fcReturn:
+        mov eax, ebx ; Move the current cluster to the return register
+        return
+
 _allocClusterList:
     fun ; void _allocClusterList() - allocates the cluster list and sets the cluster list cluster
 
@@ -151,7 +292,7 @@ _allocClusterList:
     return
 
 _addNewCluster:
-    fun ; void _addNewCluster(void* start, void* end)
+    fun ; Cluster* _addNewCluster(void* start, void* end)
 
     ; If cluster list capacity exceeded -> reallocate cluster list
     ; clusters[clusterCount] = { start, end, false }
@@ -180,7 +321,7 @@ _addNewCluster:
     add esp, 4 ; clear the stack
 
     .ancAppend: ; appends the new cluster
-        ; Get the new cluster address (Cluster* cl = [clusters + clusterCount * CLUSTER_STRUCT_SIZE]
+        ; Get the new cluster address (Cluster* cl = [clusters + clusterCount * CLUSTER_STRUCT_SIZE] fixme -4?
         mov eax, [clusterCount]
         mov ebx, CLUSTER_STRUCT_SIZE
         mul ebx ; eax = eax (clusterCount) * ebx (CLUSTER_STRUCT_SIZE)
@@ -195,6 +336,8 @@ _addNewCluster:
         mov [ebx + CLUSTER_END_ADDR_INDEX], eax ; cl.end = eax
 
         mov [ebx + CLUSTER_IS_RESERVED_INDEX], byte FALSE ; cl.reserved = false
+
+    mov eax, ebx ; Return the new cluster
 
     return
 
@@ -223,7 +366,7 @@ _reserveCluster:
     mov [ebx + CLUSTER_END_ADDR_INDEX], eax ; cl.end = eax
 
     ; Add a new cluster using _addNewCluster(eax (cl.start + size) + 4; cl.end)
-    push dword [ebx + CLUSTER_END_ADDR_INDEX] ; param end
+    push dword [ebx + CLUSTER_END_ADDR_INDEX] ; param end fixme using the new end??
     add eax, 4 ; start must be an address one above the end
     push eax ; param start
     call _addNewCluster ; _addNewCluster(eax, cl.end)

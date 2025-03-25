@@ -4,3 +4,6 @@ build
 program
 .gdbinit
 *.iml
+other
+
+test/test.c

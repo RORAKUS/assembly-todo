@@ -3,6 +3,7 @@ project(todo C)
 
 set(CMAKE_C_STANDARD 11)
 
-add_executable(todo c/main.c)
-add_executable(todo-asm c/main.asm.c
-        c/alloc.c)
+add_executable(c c/main.c)
+add_executable(asm-c asm-c/main.c asm-c/alloc.c asm-c/alloc.h)
+add_executable(unit-tests test/alloc-test.c asm-c/alloc.c asm-c/alloc.h)
+add_executable(test test/test.c)

@@ -10,6 +10,7 @@
 #include <memory.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "alloc.h"
 
 #pragma clang diagnostic push
@@ -29,6 +30,8 @@
 #define SYS_BRK(num) ((void*) syscall(SYS_brk, num))
 #define CURRENT_BRK SYS_BRK(0)
 
+#define CLUSTER_LIST_BYTE_APPENDIX (CLUSTER_LIST_APPENDIX * CLUSTER_SIZE)
+
 typedef struct {
     void* start;
     long size;
@@ -44,11 +47,11 @@ Cluster* findClusterByEnd(void* end);
 void joinClusters(Cluster* finalCluster, Cluster* appendedCluster);
 
 Cluster* addCluster(void* start, long size);
-void joinNeighbourClusters(Cluster* cl);
+Cluster* joinNeighbourClusters(Cluster* cl);
 void removeCluster(Cluster* cl);
 int reserveCluster(Cluster* cl, long size);
 void freeCluster(Cluster* cl); // without calling freeMemory()
-void deleteUselessClusters();
+void deleteUselessMemory();
 
 int reallocClustersCluster();
 
@@ -122,8 +125,9 @@ void* asm_realloc(void* ptr, long size) {
     }
 
     if (alignedSize == cluster->size) return ptr;
+
     if (alignedSize < cluster->size) {
-        int exitCode = reserveCluster(cluster, size);
+        int exitCode = reserveCluster(cluster, alignedSize);
         if (exitCode == -1) return NULL;
         return ptr;
     }
@@ -135,7 +139,7 @@ void* asm_realloc(void* ptr, long size) {
     void* newClusterStart = asm_alloc(alignedSize);
 
     memmove(newClusterStart, oldClusterStart, oldClusterSize);
-    deleteUselessClusters();
+    deleteUselessMemory();
 
     return newClusterStart;
 }
@@ -159,7 +163,7 @@ int asm_free(void* ptr) {
     }
 
     freeCluster(cluster);
-    deleteUselessClusters();
+    deleteUselessMemory();
 
     return 0;
 }
@@ -174,15 +178,15 @@ void init_allocator() {
      * 3. Set the clusters variable
      */
 
-    long reserveBytes = CLUSTER_LIST_APPENDIX * CLUSTER_SIZE;
-    void* clustersClusterStart = reserveMemory(reserveBytes);
+    void* clustersClusterStart = reserveMemory(CLUSTER_LIST_BYTE_APPENDIX);
 
-    if (clustersClusterStart == NULL)
-        fprintf(stderr, "Failed to initialize the allocator: SYS_BRK error.");
-
+    if (clustersClusterStart == NULL) {
+        fprintf(stderr, "Failed to initialize the allocator: SYS_BRK error.\n");
+        exit(1);
+    }
     clusters = clustersClusterStart;
     clustersCluster.start = clustersClusterStart;
-    clustersCluster.size = reserveBytes;
+    clustersCluster.size = CLUSTER_LIST_BYTE_APPENDIX;
 }
 
 int set_alloc_memory_appendix(long value) {
@@ -240,7 +244,7 @@ Cluster* freeClusterForSize(long size) {
      */
 
     Cluster* selectedCluster = NULL;
-    long minSize = LONG_MAX;
+    long minSize = ULONG_MAX;
 
     for (long i = 0; i < clusterCount; i++) {
         Cluster* currentCluster = &clusters[i];
@@ -298,7 +302,7 @@ void joinClusters(Cluster* finalCluster, Cluster* appendedCluster) {
      */
 
     void* finalClusterEnd = finalCluster->start + finalCluster->size;
-    if (finalClusterEnd != appendedCluster->start) return; // error?
+    if (finalClusterEnd != appendedCluster->start) return;
 
     finalCluster->size += appendedCluster->size;
     removeCluster(appendedCluster);
@@ -328,12 +332,10 @@ Cluster* addCluster(void* start, long size) {
     cluster->size = size;
     cluster->reserved = false;
 
-    joinNeighbourClusters(cluster);
-
-    return cluster;
+    return joinNeighbourClusters(cluster);
 }
 
-void joinNeighbourClusters(Cluster* cl) {
+Cluster* joinNeighbourClusters(Cluster* cl) {
     /*
      * 0. Check if the cluster is free
      * 1. Find the next cluster
@@ -342,7 +344,7 @@ void joinNeighbourClusters(Cluster* cl) {
      * 4. If the previous cluster exists and is free join it
      */
 
-    if (cl->reserved) return;
+    if (cl->reserved) return cl;
 
     Cluster* nextCluster = findClusterByStart(cl->start + cl->size);
     Cluster* previousCluster = findClusterByEnd(cl->start);
@@ -350,8 +352,12 @@ void joinNeighbourClusters(Cluster* cl) {
     if (nextCluster != NULL && !nextCluster->reserved)
         joinClusters(cl, nextCluster);
 
-    if (previousCluster != NULL && !previousCluster->reserved)
-        joinClusters(cl, previousCluster);
+    if (previousCluster != NULL && !previousCluster->reserved) {
+        joinClusters(previousCluster, cl);
+        return previousCluster;
+    }
+
+    return cl;
 }
 
 void removeCluster(Cluster* cl) {
@@ -367,13 +373,13 @@ void removeCluster(Cluster* cl) {
 
         if (currentCluster->start == cl->start) break;
     }
-    if (i == clusterCount) return; // ERR?
+    if (i == clusterCount) return;
 
     long bytesToCopy = (clusterCount - i - 1) * CLUSTER_SIZE;
 
     if (bytesToCopy != 0) {
-        memcpy(&clusters[i], &clusters[i + 1], bytesToCopy);
-        joinNeighbourClusters(&clusters[i]);
+        memmove(cl, cl + CLUSTER_SIZE, bytesToCopy);
+        joinNeighbourClusters(cl);
     }
 
     clusterCount--;
@@ -413,7 +419,7 @@ void freeCluster(Cluster* cl) {
     joinNeighbourClusters(cl);
 }
 
-void deleteUselessClusters() {
+void deleteUselessMemory() {
     /**
      * 1. Find a cluster with the highest start address
      * 2. If the cluster is free and its size is bigger then 2 x 'allocMemoryAppendix' shrink it using freeMemory()
@@ -440,9 +446,7 @@ void deleteUselessClusters() {
 
     if (lastCluster->size <= maxSize) return;
 
-    void* newClusterEnd = lastCluster->start + maxSize;
-    freeMemory(newClusterEnd);
-
+    freeMemory(lastCluster->start + maxSize);
     lastCluster->size = maxSize;
 }
 
@@ -454,7 +458,7 @@ int reallocClustersCluster() {
      * 3. Append the old cluster to the clusters list
      */
 
-    long newSize = clustersCluster.size + CLUSTER_LIST_APPENDIX * CLUSTER_SIZE;
+    long newSize = clustersCluster.size + CLUSTER_LIST_BYTE_APPENDIX;
     void* newMemory = reserveMemory(newSize);
 
     if (newMemory == NULL) return -1;
@@ -482,6 +486,9 @@ long alignNumber(long value) {
      */
     return (value + ALIGN_TO_BYTE) & ~(ALIGN_TO_BYTE - 1); // +4 -> it doesn't decrease
 }
+
+// todo add when clustersCluster ends with too much memory -> append the memory to normal clusters (and also invoke useless memory deletion just in case)
+// todo reallocate lower size -> also allocate again
 // endregion
 #pragma clang diagnostic pop
 #pragma clang diagnostic pop

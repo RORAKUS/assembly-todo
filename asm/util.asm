@@ -23,9 +23,9 @@ ret
 ;; Code
 
 section .text
-global strlen
-global itostr
 global memmove
+global strlen
+global numtostr
 
 memmove: ; moves 'size' bytes from 'src' to 'dest'
     fun ; void memmmove(void* dest, void* src, long size)
@@ -86,54 +86,65 @@ strlen: ; computes and retuns the length of a string
 
     return
 
-itostr: ; void itostr(char*[11] str, int num) - converts an integer into a string with a \0 character at the end
-    push ebp ; function enter logic - saves and sets ebp to the stack top
-    mov ebp, esp
+numtostr: ; converts a number into a string
+    fun ; void numtostr(char* str, long num)
 
-    push eax ; save registers
-    push ebx
-    push ecx
-    push edx
-    push edi
-    ;; Function logic
+    ; 1. Keep dividing the number by 10:
+    ;   a. push the remainder as a character onto the stack
+    ;   b. set the number to be divided next time to the result
+    ;   c. increase the digit count by 1
+    ; 2. Pop all the digits from the stack one by one and add them to the string
+    ; 3. Append the \0 character
 
-    mov edi, [ebp + 8] ; save the string address into edi (param str)
+    ; Allocate new space for local variables:
+    ;   long digitCount: [esp]
+    sub esp, 4
 
-    ; Convert the number into the string and save length in ecx:
-    ;   eax - the whole part; ebx - the divider, ecx - the counter; edx - the remainder
-    mov eax, [ebp + 12] ; initialize the whole part to the num parameter
-    mov ebx, 10 ; the divider
-    mov ecx, 0 ; the character counter
-    .itostrLoop1: ; the number convertor loop
-        mov edx, 0 ; the remainder will also act as the first part for the division, must be zero before
-        div ebx ; divide edx:eax with 10, save the whole part into eax and remainder into edx
-        add edx, ZERO_ASCII_CODE ; convert the remainder into a character
-        push dx ; push the remainder character to the stack
-        inc ecx ; increase the counter
-        cmp eax, 0 ; if the whole part is greater then 0 continue in the loop
-        ja .itostrLoop1
+    ; Initialize the variables
+    ;   long wholePart: [eax]
+    mov eax, PARAM_2 ; wholePart = num
+    mov dword [esp], 0 ; digitCount = 0
+    mov ebx, 10 ; the divider, must be in a register
 
-    ; Reverse the number and append the null byte:
-    ;   ecx - the character count, ebx - the reverse counter for the final string
-    mov ebx, 0 ; initialize the string counter
-    .itostrLoop2: ; the reverse loop
-        pop ax ; pop the character from the stack
-        mov [edi + ebx], al ; move the character into the string
+    ; Divide the number by 10 until whole part is 0 { do ... while (wholePart != 0) }
+    .numtostrLoop1:
+        ; Divide the whole part by 10
+        ; { long remainder = wholePart % 10 ; wholePart /= 10 }
+        ;   long remainder: [edx]
+        mov edx, 0 ; needed for division (edx:eax is the divisor)
+        div ebx ; eax = wholePart / 10; edx = wholePart % 10
 
-        dec ecx ; decrease the character counter
-        inc ebx ; increase the string counter
-        cmp ecx, 0 ; if ecx != 0 continue (when all digits are done)
-        jne .itostrLoop2
-   mov [edi + ebx], byte STREND ; append the null byte
+        ; Convert the remainder into an ascii character by adding '0' character code { remainer += '0' }
+        add edx, ZERO_ASCII_CODE ; edx += '0'
 
-    ;; End function logic
+        ; Push one byte from the remainder onto the stack (there are no other bytes)
+        push dl
 
-    pop edi ; retreive registers
-    pop edx
-    pop ecx
-    pop ebx
-    pop eax
+        ; Increase the digit count
+        inc dword [esp] ; digitCount++
 
-    mov esp, ebp ; clears stack back to it's original state
-    pop ebp ; retreive ebp
-    ret
+        cmp eax, 0 ; if (wholePart != 0) continue
+        jne .numtostrLoop1
+
+    ; Save the 'str' parameter into ebx
+    mov ebx, PARAM_1 ; ebx = str
+    ; Go through all the saved digits on the stack and add them to the string { for (int i = 0; i < digitCount; i++) }
+    ;   long i: [ecx]
+    mov ecx, 0 ; i = 0
+    .numtostrLoop2:
+        cmp ecx, [esp] ; if (i >= digitCount) break
+        jae .numtostrExitLoop2
+
+        ; Pop the character and add it into the string { str[i] = pop() }
+        lea edx, [ebx + ecx] ; edx = &str[i]
+        pop byte [edx] ; *edx = pop()
+
+        inc ecx ; i++
+        jmp .numtostrLoop2 ; continue the loop
+    .numtostrExitLoop2:
+
+    ; Append the NULL byte at the end of the string
+    mov edx, [esp] ; edx = digitCount
+    mov byte [ebx + edx], STREND ; str[edx] = '\0'
+
+    return
